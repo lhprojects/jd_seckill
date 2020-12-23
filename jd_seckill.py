@@ -6,18 +6,26 @@ import time
 import json
 import os
 import copy
-import _thread
+import threading
 from bs4 import BeautifulSoup
+from datetime import datetime
+
 #cookie，可以在我的订单页面，搜索list的网络请求，获取cookie值
-thor = ''
+thor = 'CE937B0BD5B8F3E90A6BB85695BCBDB701E282EC17F097DE0458C96762B5A4AFFEE1ED9D63457359F775EA07D315445D8426C6D1F2E593FDE170E09C8838ABCBE44D8902AEA1CFF470506B47FB116FAA5435DB281862350DE6DBA258B11BE15444004A85C2790B0FD0BA999781BCF5CD353D1DD07653A699CC0DC1213E4950BF'
 #日志模板，有颜色和状态
 LOG_TEMPLE_BLUE='\033[1;34m{}\033[0m '
 LOG_TEMPLE_RED='\033[1;31m{}\033[0m '
 LOG_TEMPLE_SUCCESS='\033[1;32mSUCCESS\033[0m '
 LOG_TEMPLE_FAILED='\033[1;31mFAILED\033[0m '
 
+def timestamp_to_str(timestamp):
+    return datetime.strftime(datetime.fromtimestamp(timestamp),'%Y-%m-%d %H:%M:%S.%f')
+
+def timeduration_to_str(timeduration):
+    return "%10.0f s"%timeduration
+
 class JD:
-    headers = {
+    base_headers = {
         'referer': '',
         'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/68.0.3440.106 Safari/537.36',
     }
@@ -43,16 +51,6 @@ class JD:
         #会话
         self.session = requests.session()
 
-        #3080搜索链接
-        self.rep_url = 'https://search.jd.com/search?keyword=3080&qrst=1&wq=3080&shop=1&ev=exbrand_%E4%B8%83%E5%BD%A9%E8%99%B9%EF%BC%88Colorful%EF%BC%89%5E296_136030%5Eexprice_6299-6299%5E'
-        #耕升3080追风
-        self.g_url = 'https://item.jd.com/100015062658.html'
-        #商品详情地址
-        self.item_info_url = 'https://item-soa.jd.com/getWareBusiness?skuId={}'
-        #预约地址
-        self.appoint_url = ''
-        self.config = {}
-
         #cookie
         self.thor = thor
         #重试次数限制
@@ -62,176 +60,134 @@ class JD:
         #重试计数
         self.retry_count = 0
         #本地时间与京东时间差
-        self.time_diff = 0.1
-        
-    def initTime(self):
+        self.time_diff = 0.0
+
+  
+    #登录，然后抢预约成功的商品
+    def start(self, items): 
+
+        self.init_time()
+        self.pull_user_info()        
+
+        #遍历预约成功的商品，挨个抢购
+
+        threads = []
+        for key in items:
+
+            item = copy.copy(self)
+
+            order_time = items[key]["order_time"]
+            item_url = items[key]["item_url"]
+
+            timetuple = time.strptime(order_time, "%Y-%m-%d %H:%M")
+            order_time_st = time.mktime(timetuple)
+
+            item.goods_url = item_url
+            item.key = key
+            item.order_time_st = order_time_st
+            item.order_time = order_time
+
+            thread = threading.Thread(target=self.run, args=(item,))
+            thread.start()
+            threads.append(thread)
+
+        for thread in threads:            
+            thread.join()
+      
+    def init_time(self):
         ret = requests.get(self.clock_url).text
         js = json.loads(ret)
-        self.time_diff = js.get('serverTime')/1000 - time.time() + 0.001
+        servertime = js.get('serverTime')/1000
+        localtime = time.time()
+        self.time_diff = servertime - localtime
+        print("server time: ", timestamp_to_str(servertime))
+        print(" local time: ", timestamp_to_str(localtime))
+        print("calibration: ", self.time_diff, " s")
 
-    #登录，然后抢预约成功的商品
-    def buy(self): 
-        #1通过session获取用户信息
+    def pull_user_info(self):
+
+        headers = copy.copy(JD.base_headers)
+        headers['referer'] = 'https://cart.jd.com/cart.action'
+        c = requests.cookies.RequestsCookieJar()
+        c.set('thor', self.thor)  
+        self.session.cookies.update(c)
         response = self.session.get(
-            url=self.user_url, headers=JD.headers).text.strip('jsonpUserinfo()\n')
-        #1.1调用内置的loads方法获取json格式的用信息
+            url=self.user_url, headers=headers).text.strip('jsonpUserinfo()\n')
         self.user_info = json.loads(response)
-        if self.user_info.get('nickName'):
-            #遍历预约成功的商品，挨个抢购
-            for key in self.config:
-                item = copy.copy(self)
-                #下单时间（使用本机时间，记得和京东服务器同步时间）
-                timeArray = time.strptime(self.config[key]['order_time'], "%Y-%m-%d %H:%M")
-                order_time_st = int(time.mktime(timeArray))
-                item.order_time_st = order_time_st
-                self.config[key]['order_time_st'] = order_time_st
-                item.goods_url = self.config[key]['goods_url']
-                item.order_time = self.config[key]['order_time']
-                _thread.start_new_thread( self.run, (item, ))
-                pass
-            _thread.start_new_thread(self.log,())
-            pass
+        if not self.user_info.get('nickName'):
+            raise Exception("账号验证错误请检查cookie: thor")
 
-            
-    #日志方法
-    def log(self):
-        clock = round(time.time())
-        i = 0
-        while True:
-            time.sleep(0.1)
-            r = round(time.time())
-            if r > clock:
-                i += 1
-                clock = r
-                print('\x1b[H\x1b[2J')
-                log = []
-                log.append(LOG_TEMPLE_BLUE.format('账号') + self.user_info.get('nickName') + '\n\n')
-
-                for key in self.config:
-                    if time.time() <= self.config[key]['order_time_st']:
-                        log.append('\t\t' + LOG_TEMPLE_RED.format(key) + '\n')
-                        log.append(LOG_TEMPLE_BLUE.format('抢购时间')  + self.config[key]['order_time'] + '\n')
-                        log.append(LOG_TEMPLE_BLUE.format('剩余时间')  + str(round(self.config[key]['order_time_st'] - r, 2)) + '秒\n\n')
-
-                print(''.join(log))
-                if i > 3600:
-                    print('开始扫描是否有新增3080商品...')
-                    self.rep()
-                    self.appoint()
-                    i = 0           
-            pass
-        
+        print("user nick name: ", self.user_info["nickName"])
 
     def run(self, item):
         while True:
-            time.sleep(item.gap)
-            if time.time() + self.time_diff <= item.order_time_st:
-                continue
+            localtime = time.time() + self.time_diff
+            if item.order_time_st - localtime > 10:
+                time.sleep(5)
+                print("\r %s left"%(timeduration_to_str(item.order_time_st - localtime)) )
+            elif item.order_time_st - localtime > item.gap:
+                time.sleep(item.gap)
+                print("\r %s left"%(timeduration_to_str(item.order_time_st - localtime)) )
+            elif item.order_time_st - localtime > 0:
+                # we need to wait a very short time
+                # let's spin
+                print("\r %s left"%(timeduration_to_str(item.order_time_st - localtime)) )
+                pass
+            else:
+                break
+
+        for i in range(item.retry_limit):
             try:
-                if item.retry_limit < 1 :
-                    return
-                
-                o = item.shopping(item)
-                
-                if o:
-                    return
-                item.retry_limit = item.retry_limit - 1
-                #重试计数
+                ok = self.order(item)
+                if ok:
+                    print("'%s' ordered sucessfully. Exit"%item.key)
+                    break
+
                 item.retry_count = item.retry_count + 1
-            except BaseException:
-                continue
+                time.sleep(item.gap)
+            except BaseException as ex:
+                print("except %s"%ex)
+                time.sleep(item.gap)
+                pass
         
 
-    def shopping(self, item):
+    def order(self, item):
+        
         #获取商品id，从url的/开始位置截取到.位置
         item.goods_id = item.goods_url[
             item.goods_url.rindex('/') + 1:item.goods_url.rindex('.')]
-        JD.headers['referer'] = item.goods_url
+
+        headers = copy.copy(JD.base_headers)
+        headers['referer'] = item.goods_url
         # url格式化，把商品id填入buy_url
         buy_url = item.buy_url.format(item.goods_id)
         #get请求，添加购物车
-        item.session.get(url=buy_url, headers=JD.headers)  
+        item.session.get(url=buy_url, headers=headers)  
         #修正购物车商品数量（第二次重试后修正购物车数量）
         if item.retry_count > 0 :
             print('第',item.retry_count,'次重试，抢购商品为：',item.goods_id,'修正购物车商品数量。')
             change_num_url = item.change_num.format(item.goods_id)
-            item.session.get(url=change_num_url, headers=JD.headers)
+            item.session.get(url=change_num_url, headers=headers)
         #get请求
-        item.session.get(url=item.pay_url, headers=JD.headers) 
+        item.session.get(url=item.pay_url, headers=headers) 
         #post请求，提交订单
         response = item.session.post(
-            url=item.pay_success, headers=JD.headers)
+            url=item.pay_success, headers=headers)
         order_id = json.loads(response.text).get('orderId')
         if order_id:
             print('抢购成功订单号:', order_id)
             return True
 
-    def rep(self):
-        JD.headers['referer'] = 'https://cart.jd.com/cart.action'
-        c = requests.cookies.RequestsCookieJar()
-        c.set('thor', self.thor)  
-        self.session.cookies.update(c)
-        response = self.session.get(
-            url=self.user_url, headers=JD.headers).text.strip('jsonpUserinfo()\n')
-        self.user_info = json.loads(response)
-        if not self.user_info.get('nickName'):
-            raise Exception("账号验证错误请检查thor")
-
-        p = self.session.get(url=self.rep_url, headers=JD.headers) 
-        bf = BeautifulSoup(p.text, features='html5lib')
-        texts = bf.find_all('div', class_ = 'p-name p-name-type-2') 
-        for text in texts:
-            time.sleep(0.2)
-            rtx = {}
-            rtx['title'] = text.em.text.replace('\n','')
-            if rtx['title'] in self.config:
-                continue
-            rtx['goods_url'] = 'https:' + text.a['href']
-            jid = rtx['goods_url'] [rtx['goods_url'].rindex('/') + 1:rtx['goods_url'].rindex('.')]
-            p = self.session.get(url=self.item_info_url.format(jid), headers=JD.headers)
-            if p.text:
-                try:
-                    yyinfo = json.loads(p.text).get('yuyueInfo')
-                    if yyinfo:
-                        rtx['appoint_url'] = yyinfo['url']
-                        rtx['order_time'] = yyinfo['buyTime'].split('-202')[0]
-                        self.config[rtx['title']] = rtx
-                        rtx['appoint'] = False
-                        print('正在添加如下商品：' + rtx['title'])
-                        pass
-                    pass
-                except BaseException:
-                    print(p.text)
-
-
     
-    def appoint(self):
-        print('开始预约\n')
-        for key in self.config:
-            if not self.config[key]['appoint']:
-                if not self.config[key]['appoint_url']:
-                    continue
-                ares = self.session.get(url='https:' + self.config[key]['appoint_url'], headers=JD.headers)
-                bf = BeautifulSoup(ares.text, features='html5lib')
-                texts = bf.find_all(class_ = 'bd-right-result')
-                if len(texts) > 0:
-                    print(key + ' 预约结果：\n' + texts[0].text.strip())
-                    self.config[key]['appoint'] = True
-                else:
-                    print(LOG_TEMPLE_RED.format(key + '\n需要手动预约：') + LOG_TEMPLE_BLUE.format('https:' + self.config[key]['appoint_url']))
-                print('--------------------------')  
-        for i in range(10):
-            time.sleep(1) 
-            end_str = '100%'
-            print('\r' + str(10 - i) + '秒后进入监控页面，若需要手动预约请CTRL+C退出脚本预约后再执行...', end='', flush=True)
+if __name__ == "__main__":
 
+    items = {
+        "3060": {
+            "order_time" : "2020-12-21 22:06",
+            "item_url" : "https://item.jd.com/8711257.html"
+        }
+    }
 
-jd = JD()
-jd.rep()
-jd.appoint()
-jd.buy()	
-
-
-while 1:
-    time.sleep(10)
-
+    jd = JD()
+    jd.start(items)
+    
